@@ -61,6 +61,16 @@ is emitted once per insertion — a tag left on the reader isn't re-read until
 it's lifted and tapped again. Behaviour is otherwise identical to the Python
 version.
 
+## Troubleshooting
+
+**`SCardEstablishContext: Access denied` / the service crash-loops at boot.**
+Modern `pcsc-lite` gates `pcscd` behind polkit, which by default only allows an
+*active desktop session*. A boot/background service (and an SSH shell) is
+inactive, so it's denied. `install.sh` installs a polkit rule
+(`/etc/polkit-1/rules.d/49-pcscd.rules`) that grants PC/SC access regardless of
+session state — that's what makes the on-boot service work. If you installed the
+binary by hand, add that rule yourself and `sudo systemctl restart polkit pcscd`.
+
 ## Configuration
 
 Same environment variables as the Python version (set them in
