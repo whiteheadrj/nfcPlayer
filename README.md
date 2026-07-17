@@ -81,6 +81,12 @@ Set environment variables in `~/.config/systemd/user/nfc-player.service`
 - **Reader not detected** — `pcsc_scan` should show the ACR122U and react to
   tags. If it doesn't, reboot once (so the module blacklist takes effect) and
   check `systemctl status pcscd`.
+- **`Access denied` / service crash-loops on boot** (Debian trixie and newer) —
+  modern `pcsc-lite` gates the daemon behind polkit, which only allows an active
+  desktop session; a boot service is inactive and gets denied. The installer
+  adds a polkit rule (`/etc/polkit-1/rules.d/49-pcscd.rules`) that fixes this. If
+  you installed before that was added, re-run `install.sh` (or add the rule and
+  `sudo systemctl restart polkit pcscd`).
 - **No sound / wrong output** — run `sudo raspi-config` → System Options →
   Audio → Headphones. Test with `mpv <some-audio-url>`.
 - **Tag reads but nothing plays** — watch the logs
