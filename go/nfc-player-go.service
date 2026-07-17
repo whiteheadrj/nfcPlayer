@@ -1,0 +1,16 @@
+[Unit]
+Description=NFC book audio player (Go)
+After=network-online.target sound.target
+
+[Service]
+ExecStart=%h/nfc-player-go/nfcplayer
+Restart=always
+RestartSec=5
+# Uncomment to override defaults:
+# Environment=SHEET_ID=1EW7mGv9IMcwiIqwEJGDhc8e-PXXOceAWLizcIYIbi-U
+# Environment=SHEET_REFRESH_SECONDS=300
+# Environment=SAME_TAG_STOPS=1
+# Environment=AUDIO_DEVICE=alsa/plughw:CARD=Headphones
+
+[Install]
+WantedBy=default.target
