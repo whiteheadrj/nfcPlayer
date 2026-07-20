@@ -11,6 +11,7 @@ Modes:
 """
 
 import csv
+import hashlib
 import io
 import logging
 import os
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 from smartcard.CardMonitoring import CardMonitor, CardObserver
@@ -37,6 +39,10 @@ AUDIO_DEVICE = os.environ.get("AUDIO_DEVICE", "")
 # Tapping the tag that is currently playing stops it (1) or restarts it (0).
 SAME_TAG_STOPS = os.environ.get("SAME_TAG_STOPS", "1") == "1"
 PLAYER_CMD = os.environ.get("PLAYER_CMD", "mpv --no-video --really-quiet")
+# Downloaded-audio cache: files play from disk after their first streamed play.
+# CACHE_MAX_MB=0 disables caching entirely.
+CACHE_DIR = os.environ.get("CACHE_DIR", os.path.expanduser("~/.cache/nfc-player"))
+CACHE_MAX_MB = int(os.environ.get("CACHE_MAX_MB", "1024"))
 
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
@@ -125,6 +131,111 @@ class TagTable:
             return self._loaded_once
 
 
+class AudioCache:
+    """Size-capped cache of downloaded audio files, evicted least-recently-played."""
+
+    def __init__(self, directory: str, max_mb: int):
+        self.dir = directory
+        self.max_bytes = max_mb * 1024 * 1024
+        self._lock = threading.Lock()
+        self._downloading = set()
+        if self.enabled:
+            os.makedirs(self.dir, exist_ok=True)
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_bytes > 0
+
+    def _path(self, url: str) -> str:
+        key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+        return os.path.join(self.dir, key + ".audio")
+
+    def get(self, url: str):
+        """Return the local path for url if cached, else None."""
+        if not self.enabled:
+            return None
+        path = self._path(url)
+        if os.path.isfile(path):
+            os.utime(path)  # mark as recently played for eviction order
+            return path
+        return None
+
+    def fetch_in_background(self, title: str, url: str):
+        if not self.enabled:
+            return
+        path = self._path(url)
+        with self._lock:
+            if path in self._downloading or os.path.isfile(path):
+                return
+            self._downloading.add(path)
+        threading.Thread(
+            target=self._download, args=(title, url, path), daemon=True
+        ).start()
+
+    def _download(self, title: str, url: str, path: str):
+        part = path + ".part"
+        try:
+            self._download_to(url, part)
+            os.replace(part, path)
+            size_mb = os.path.getsize(path) / (1024 * 1024)
+            log.info("Cached '%s' (%.1f MB)", title, size_mb)
+            self._evict()
+        except Exception as exc:
+            log.warning("Could not cache '%s': %s", title, exc)
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        finally:
+            with self._lock:
+                self._downloading.discard(path)
+
+    def _download_to(self, url: str, dest: str):
+        # Two passes: Google Drive answers big files with an HTML confirm page
+        # ("can't virus-scan this file") whose form yields the real URL.
+        for _ in range(2):
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if "text/html" in resp.headers.get("Content-Type", ""):
+                    url = self._drive_confirm_url(
+                        resp.read().decode("utf-8", errors="replace")
+                    )
+                    continue
+                with open(dest, "wb") as f:
+                    while chunk := resp.read(64 * 1024):
+                        f.write(chunk)
+                return
+        raise RuntimeError("still got a web page after following the confirm form")
+
+    @staticmethod
+    def _drive_confirm_url(html: str) -> str:
+        m = re.search(r'<form[^>]+action="([^"]+)"', html)
+        if not m or "download" not in m.group(1):
+            raise RuntimeError("URL returned a web page, not an audio file")
+        fields = re.findall(
+            r'<input type="hidden" name="([^"]+)" value="([^"]*)"', html
+        )
+        return m.group(1) + "?" + urllib.parse.urlencode(dict(fields))
+
+    def _evict(self):
+        files = [
+            os.path.join(self.dir, name)
+            for name in os.listdir(self.dir)
+            if name.endswith(".audio")
+        ]
+        files.sort(key=os.path.getmtime)  # least recently played first
+        sizes = {f: os.path.getsize(f) for f in files}
+        total = sum(sizes.values())
+        while total > self.max_bytes and files:
+            victim = files.pop(0)
+            try:
+                os.remove(victim)
+                total -= sizes[victim]
+                log.info("Evicted %s from cache", os.path.basename(victim))
+            except OSError:
+                pass
+
+
 class Player:
     """Wraps a single mpv subprocess streaming the current audio URL."""
 
@@ -203,6 +314,7 @@ def run_player():
     tags = TagTable()
     tags.refresh()
 
+    cache = AudioCache(CACHE_DIR, CACHE_MAX_MB)
     player = Player()
     uids: "queue.Queue[str]" = queue.Queue()
     monitor = CardMonitor()
@@ -249,7 +361,12 @@ def run_player():
         if SAME_TAG_STOPS and player.is_playing(uid):
             player.stop()
         else:
-            player.play(uid, title, url)
+            cached = cache.get(url)
+            if cached:
+                player.play(uid, title, cached)
+            else:
+                player.play(uid, title, url)
+                cache.fetch_in_background(title, url)
 
 
 def main():

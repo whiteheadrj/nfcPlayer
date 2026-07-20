@@ -1,16 +1,22 @@
 # nfcPlayer
 
 Tap an NFC-tagged book on the reader and the Raspberry Pi plays that book's
-audio through the 3.5mm headphone jack.
+audio through the DAC HAT's headphone jack.
 
-**Hardware:** Raspberry Pi 4 (1GB is plenty) running Raspberry Pi OS, with an
-ACS ACR122U USB NFC reader and NTAG213 stickers on the books.
+**Hardware:** Raspberry Pi 4 (1GB is plenty) running Raspberry Pi OS, an
+[InnoMaker HiFi DAC HAT](https://www.amazon.com/dp/B07D13QWV9) (PCM5122) for
+audio out, an ACS ACR122U USB NFC reader, and NTAG213 stickers on the books.
 
 **How it works:** the app watches the ACR122U for tag taps, reads the tag's
 UID, looks it up in the [Google Sheet](https://docs.google.com/spreadsheets/d/1EW7mGv9IMcwiIqwEJGDhc8e-PXXOceAWLizcIYIbi-U/edit)
 (columns `Tag`, `Book Title`, `Link`), and streams the row's audio URL with
 `mpv`. Tapping a different book switches to it; tapping the same book while
 it's playing stops it.
+
+The first play of a book streams it and downloads a copy in the background;
+after that it plays from the local cache — instant start, no re-downloading,
+and it keeps working if the network is down. The cache is capped (1 GB by
+default) and the least-recently-played books are evicted when it fills.
 
 ## Install (on the Pi)
 
@@ -23,7 +29,9 @@ The installer:
 
 - installs `pcscd`, the ACR122U driver (`libacsccid1`), `python3-pyscard`, and `mpv`
 - blacklists the kernel's built-in NFC modules (they fight with the ACR122U driver)
-- switches audio output to the headphone jack
+- enables the DAC HAT (`dtoverlay=allo-boss-dac-pcm512x-audio`, onboard audio
+  off) and makes it the default output — the HAT needs one reboot to appear,
+  so re-run `install.sh` after rebooting to finish that step
 - installs and starts a systemd user service (`nfc-player`) that runs on boot
 
 Plug the ACR122U into any USB port. Its LED turns green when `pcscd` has
@@ -52,8 +60,13 @@ is running and its UID appears in the logs
 - Direct URLs to `.mp3`/`.m4a`/etc. work best.
 - Google Drive share links (`drive.google.com/file/d/...`) and Dropbox share
   links are converted to direct-download form automatically. Drive files must
-  be shared as "Anyone with the link", and very large Drive files (>100MB) may
-  be blocked by Drive's virus-scan page — a direct host is more reliable.
+  be shared as "Anyone with the link". Very large Drive files (>100MB) hit
+  Drive's virus-scan page, which can break the first streamed play — but the
+  background cache download follows the confirm form, so from the second tap
+  on they play fine from the local copy.
+- If you re-record a book, upload it as a **new** file and update the link —
+  the changed URL busts the cache. Replacing the contents behind the same
+  link keeps playing the old cached copy.
 - The sheet itself must be viewable by "Anyone with the link" (it already is).
 
 ## Everyday use
@@ -75,6 +88,8 @@ Set environment variables in `~/.config/systemd/user/nfc-player.service`
 | `SHEET_REFRESH_SECONDS` | `300` | How often to re-fetch the sheet |
 | `SAME_TAG_STOPS` | `1` | `1` = same tag stops playback, `0` = restarts it |
 | `AUDIO_DEVICE` | (system default) | mpv audio device, e.g. `alsa/plughw:CARD=Headphones` |
+| `CACHE_DIR` | `~/.cache/nfc-player` | Where downloaded audio files are kept |
+| `CACHE_MAX_MB` | `1024` | Cache size cap in MB; oldest-played files are evicted. `0` disables caching |
 
 ## Troubleshooting
 
@@ -87,8 +102,11 @@ Set environment variables in `~/.config/systemd/user/nfc-player.service`
   adds a polkit rule (`/etc/polkit-1/rules.d/49-pcscd.rules`) that fixes this. If
   you installed before that was added, re-run `install.sh` (or add the rule and
   `sudo systemctl restart polkit pcscd`).
-- **No sound / wrong output** — run `sudo raspi-config` → System Options →
-  Audio → Headphones. Test with `mpv <some-audio-url>`.
+- **No sound / wrong output** — check the DAC is up: `aplay -l` should list a
+  `BossDAC` card (if not, the overlay isn't loaded — re-run `install.sh` and
+  reboot). Then `wpctl status` should show the DAC's sink (`Built-in Audio
+  Stereo`) starred as default; fix with `wpctl set-default <SINK_ID>`. Test
+  with `mpv <some-audio-url>`.
 - **Tag reads but nothing plays** — watch the logs
   (`journalctl --user -u nfc-player -f`): an unknown UID means the sheet row
   doesn't match (the UID must match exactly, no spaces); a player error means
