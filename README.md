@@ -37,6 +37,20 @@ The installer:
 Plug the ACR122U into any USB port. Its LED turns green when `pcscd` has
 claimed it; it beeps when it sees a tag.
 
+### Updating
+
+The service runs an installed **copy** at `~/nfc-player/`, not the repo
+checkout — a `git pull` alone doesn't change what's running. To deploy an
+update:
+
+```bash
+cd ~/nfcPlayer && git pull
+cp nfc_player.py ~/nfc-player/
+systemctl --user restart nfc-player
+```
+
+(Or re-run `bash install.sh`, which does the same plus the system setup.)
+
 ## Register your books
 
 1. Stop the player and run register mode:
