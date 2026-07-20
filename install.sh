@@ -36,15 +36,35 @@ polkit.addRule(function(action, subject) {
 EOF
 sudo systemctl restart polkit pcscd 2>/dev/null || true
 
-echo "==> Routing audio to the 3.5mm headphone jack..."
-if command -v wpctl >/dev/null 2>&1; then
-  # PipeWire/WirePlumber: raspi-config can't set this — do it via the sink list.
-  echo "    PipeWire detected. Set the jack as default output from the taskbar"
-  echo "    volume icon, or: 'wpctl status' then 'wpctl set-default <SINK_ID>'."
+echo "==> Enabling the InnoMaker HiFi DAC HAT (PCM5122)..."
+# The HAT has no ID EEPROM, so its device-tree overlay (the Allo Boss one,
+# per InnoMaker's manual) must be enabled by hand. Onboard audio is disabled
+# so the DAC is the only analog output.
+BOOT_CFG=/boot/firmware/config.txt
+[ -f "$BOOT_CFG" ] || BOOT_CFG=/boot/config.txt
+NEED_REBOOT=0
+if ! grep -q "^dtoverlay=allo-boss-dac-pcm512x-audio" "$BOOT_CFG"; then
+  sudo sed -i 's/^dtparam=audio=on/#dtparam=audio=on/' "$BOOT_CFG"
+  echo "dtoverlay=allo-boss-dac-pcm512x-audio" | sudo tee -a "$BOOT_CFG" >/dev/null
+  NEED_REBOOT=1
+fi
+
+echo "==> Making the DAC the default audio output..."
+if aplay -l 2>/dev/null | grep -q BossDAC && command -v wpctl >/dev/null 2>&1; then
+  # PipeWire: find the BossDAC sink and set it as default (WirePlumber
+  # remembers this across reboots).
+  for id in $(wpctl status 2>/dev/null | sed -n '/Sinks:/,/Sources:/p' \
+              | grep -oE '[0-9]+\.' | tr -d '.'); do
+    if wpctl inspect "$id" 2>/dev/null | grep -q 'alsa.card_name = "BossDAC"'; then
+      wpctl set-default "$id"
+      wpctl set-volume "$id" 0.3
+      wpctl set-mute "$id" 0
+      echo "    BossDAC (sink $id) is now the default output at 30% volume."
+      break
+    fi
+  done
 else
-  # Non-fatal: on some OS versions this is done in raspi-config instead.
-  sudo raspi-config nonint do_audio 1 2>/dev/null || \
-    echo "    (couldn't set automatically — use 'sudo raspi-config' > System > Audio)"
+  echo "    DAC not visible yet — it appears after the reboot below."
 fi
 
 echo "==> Installing the app to $APP_DIR..."
@@ -61,6 +81,11 @@ systemctl --user enable --now nfc-player
 
 echo
 echo "Done! The player is running and will start automatically on boot."
+if [ "$NEED_REBOOT" = 1 ]; then
+  echo
+  echo "  REBOOT REQUIRED to bring up the DAC HAT, then run 'bash install.sh'"
+  echo "  once more (it's idempotent) to set it as the default output."
+fi
 echo
 echo "  Logs:          journalctl --user -u nfc-player -f"
 echo "  Register tags: systemctl --user stop nfc-player"
